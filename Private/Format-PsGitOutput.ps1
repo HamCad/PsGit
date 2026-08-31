@@ -84,6 +84,7 @@ function Format-PsGitHelpLine {
         , @('git branch new <name>', 'Create a branch')
         , @('git branch rm <name> [-f|--force|-D]', 'Delete a branch (-f/--force/-D forces an unmerged one)')
         , @('git checkout <branch|commit>', 'Switch branches (working tree must be clean or confirmed)')
+        , @('git checkout -b <new-branch> [<start-point>]', 'Create a branch (from HEAD, or <start-point>) and switch to it')
         , @('git restore <path...> | .', 'Discard unstaged edits in path(s), from the index')
         , @('git restore --staged <path...> | .', 'Unstage path(s) (alias: git unstage <path...>)')
         , @('git reset [<path...>]', 'Unstage path(s), or everything with no path')
@@ -102,6 +103,7 @@ function Format-PsGitHelpLine {
         'git log 5'
         'git branch new feature-x'
         'git checkout feature-x'
+        'git checkout -b feature-y'
         'git branch rm feature-x -f'
         'git restore firstfile.txt'
         'git restore --staged firstfile.txt'

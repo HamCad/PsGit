@@ -178,7 +178,22 @@ function Invoke-PsGitCommand {
         }
         'checkout' {
             $parts = @($rest.Trim() -split '\s+' | Where-Object { $_ })
-            if ($parts.Count -eq 0) { Write-Host "`n* Usage: git checkout <branch|commit>`n" -ForegroundColor Yellow; break }
+            if ($parts.Count -eq 0) { Write-Host "`n* Usage: git checkout <branch|commit> | -b <new-branch> [<start-point>]`n" -ForegroundColor Yellow; break }
+            if ($parts[0] -eq '-b') {
+                if ($parts.Count -lt 2) { Write-Host "`n* Usage: git checkout -b <new-branch> [<start-point>]`n" -ForegroundColor Yellow; break }
+                $newName = $parts[1]
+                $startPoint = if ($parts.Count -ge 3) { $parts[2] } else { $null }
+                $startId = $null
+                if ($startPoint) {
+                    $startId = Get-PsGitRef -RepoPath $repo -Name "refs/heads/$startPoint"
+                    if (-not $startId) { $startId = try { Resolve-PsGitId -RepoPath $repo -Id $startPoint } catch { $null } }
+                    if (-not $startId) { Write-Host "`n* Unknown ref '$startPoint'`n" -ForegroundColor Red; break }
+                }
+                # New-PsGitBranch throws (caught by this function's outer try/catch) if $newName
+                # already exists - mirrors real git's `checkout -b` refusing to clobber a branch.
+                New-PsGitBranch -RepoPath $repo -Name $newName -StartId $startId
+                $parts = @($newName)
+            }
             $refName = $parts[0]
             $branchId = Get-PsGitRef -RepoPath $repo -Name "refs/heads/$refName"
             $targetId = if ($branchId) {
