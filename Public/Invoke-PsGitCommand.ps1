@@ -209,6 +209,21 @@ function Invoke-PsGitCommand {
             }
             if (-not $targetId) { Write-Host "`n* Unknown ref '$refName'`n" -ForegroundColor Red; break }
             $prevHead = Get-PsGitHead -RepoPath $repo
+            # Orphan-commit warning (#23 git-t-mining candidate #10, t2020-checkout-detach.sh):
+            # if we're currently detached (HEAD is a bare commit id, not a branch) and that commit
+            # isn't reachable from any branch tip, switching away would leave it - and any commits
+            # made while detached - with nothing pointing at them once the reflog eventually ages
+            # out. Real git only warns here, it doesn't refuse; mirror that rather than blocking.
+            if (-not $prevHead.Symbolic -and $prevHead.Id) {
+                $stillReachable = $false
+                foreach ($b in (Get-PsGitBranch -RepoPath $repo)) {
+                    if (Test-PsGitIsAncestor -RepoPath $repo -AncestorId $prevHead.Id -DescendantId $b.Id) { $stillReachable = $true; break }
+                }
+                if (-not $stillReachable) {
+                    $shortId = $prevHead.Id.Substring(0, 7)
+                    Write-Host "`nWarning: you are leaving $shortId behind - not connected to any branch.`nIf you want to keep it, create a new branch: git checkout -b <name> $shortId`n" -ForegroundColor Yellow
+                }
+            }
             # Restore-PsGitTree's own per-path conflict check (#8) plus -PreserveUnaffectedEdits
             # (#30) is the sole authority here now, matching real git: a path whose committed
             # content is identical between the current and target branch rides along untouched no
