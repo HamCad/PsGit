@@ -83,7 +83,11 @@ function Format-PsGitHelpLine {
         , @('git branch', 'List branches')
         , @('git branch new <name>', 'Create a branch')
         , @('git branch rm <name> [-f|--force|-D]', 'Delete a branch (-f/--force/-D forces an unmerged one)')
-        , @('git checkout <branch|commit>', 'Switch branches or restore the working tree')
+        , @('git checkout <branch|commit>', 'Switch branches (working tree must be clean or confirmed)')
+        , @('git restore <path...> | .', 'Discard unstaged edits in path(s), from the index')
+        , @('git restore --staged <path...> | .', 'Unstage path(s) (alias: git unstage <path...>)')
+        , @('git reset [<path...>]', 'Unstage path(s), or everything with no path')
+        , @('git reset --hard', 'Reset index and working tree to HEAD (discards everything)')
         , @('git help | -h | --help', 'Show this help')
     )
     $width = ($cmds | ForEach-Object { $_[0].Length } | Measure-Object -Maximum).Maximum
@@ -99,6 +103,10 @@ function Format-PsGitHelpLine {
         'git branch new feature-x'
         'git checkout feature-x'
         'git branch rm feature-x -f'
+        'git restore firstfile.txt'
+        'git restore --staged firstfile.txt'
+        'git reset'
+        'git reset --hard'
     )) { & $add "  $ex" }
     & $add ''
     & $add "PsGit runs entirely on this machine's local .git store - there is" 'DarkGray'

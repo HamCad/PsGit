@@ -2,7 +2,8 @@ function Invoke-PsGitCommand {
     <#
     .SYNOPSIS
         Drives the pure-PowerShell, local-only git engine (init/status/log/diff/add/commit/branch/
-        checkout/help) against a working directory - no git.exe, no remotes, no push/fetch/clone.
+        checkout/restore/reset/help) against a working directory - no git.exe, no remotes, no
+        push/fetch/clone.
     .DESCRIPTION
         Ported from PowerGenAI's in-chat /git command. That original took its subcommand line from a
         chat REPL and its output/prompt/commit-message-drafting from PowerGenAI's provider and TUI
@@ -36,6 +37,7 @@ function Invoke-PsGitCommand {
     $sub = if ($arg) { ($arg -split '\s+', 2)[0].ToLowerInvariant() } else { 'status' }
     if ($sub -in @('-h', '--help')) { $sub = 'help' }
     $rest = if ($arg -and $arg -match '\s') { ($arg -split '\s+', 2)[1] } else { '' }
+    if ($sub -eq 'unstage') { $sub = 'restore'; $rest = ('--staged ' + $rest).Trim() }
     $repo = $RepoPath
 
     if ($sub -notin @('init', 'help') -and -not (Test-PsGitRepo -RepoPath $repo).IsRepo) {
@@ -125,6 +127,53 @@ function Invoke-PsGitCommand {
                 Write-Host "`n* Deleted branch $name`n" -ForegroundColor Yellow
             } else {
                 Write-Host "`n* Usage: git branch [new <name> | rm <name> [-f|--force|-D]]`n" -ForegroundColor Yellow
+            }
+        }
+        'restore' {
+            $tokens = @(ConvertTo-PsGitArgTokens -Text $rest)
+            $staged = $false
+            if ($tokens -contains '--staged' -or $tokens -contains '-S') {
+                $staged = $true
+                $tokens = @($tokens | Where-Object { $_ -ne '--staged' -and $_ -ne '-S' })
+            }
+            if ($tokens.Count -eq 0) {
+                Write-Host "`n* Usage: git restore [--staged] <path...> | .`n" -ForegroundColor Yellow
+                break
+            }
+            $st = Get-PsGitStatus -RepoPath $repo
+            $paths = if ($tokens.Count -eq 1 -and $tokens[0] -eq '.') {
+                if ($staged) { @($st.Staged | ForEach-Object Path) } else { @($st.Unstaged | ForEach-Object Path) }
+            } else { $tokens }
+            if ($paths.Count -eq 0) { Write-Host "`n* Nothing to restore`n" -ForegroundColor DarkGray; break }
+            if ($staged) {
+                Restore-PsGitIndexFile -RepoPath $repo -Path $paths
+                Write-Host "`n* Unstaged $($paths.Count) file(s)`n" -ForegroundColor Green
+            } else {
+                Restore-PsGitWorktreeFile -RepoPath $repo -Path $paths
+                Write-Host "`n* Restored $($paths.Count) file(s)`n" -ForegroundColor Green
+            }
+        }
+        'reset' {
+            $tokens = @($rest.Trim() -split '\s+' | Where-Object { $_ })
+            if ($tokens -contains '--hard') {
+                $head = Get-PsGitHead -RepoPath $repo
+                if (-not $head.Id) { Write-Host "`n* Nothing to reset (no commits yet)`n" -ForegroundColor Yellow; break }
+                $st = Get-PsGitStatus -RepoPath $repo
+                $dirty = (@($st.Staged).Count + @($st.Unstaged).Count) -gt 0
+                if ($dirty) {
+                    $ans = Read-Host -Prompt 'This discards ALL staged and unstaged changes. Continue? (y/N)'
+                    if ($ans -notmatch '^(y|yes)$') { Write-Host "`n* Reset aborted`n" -ForegroundColor Yellow; break }
+                }
+                # Restore-PsGitTree reconciles both the index and the working tree against HEAD in
+                # one pass - exactly what a hard reset is. -Force carries through the dirty-check
+                # this case already did above, same pattern checkout uses for its own prompt.
+                Restore-PsGitTree -RepoPath $repo -Id $head.Id -Force
+                Write-Host "`n* HEAD is now at $($head.Id.Substring(0,7)) (index and working tree reset)`n" -ForegroundColor Green
+            } else {
+                $paths = @($tokens | Where-Object { $_ -ne '.' -and $_ -ne '--mixed' })
+                Restore-PsGitIndexFile -RepoPath $repo -Path $paths
+                if ($paths.Count -eq 0) { Write-Host "`n* Unstaged all changes`n" -ForegroundColor Green }
+                else { Write-Host "`n* Unstaged $($paths.Count) file(s)`n" -ForegroundColor Green }
             }
         }
         'checkout' {
