@@ -217,8 +217,12 @@ function Invoke-PsGitCommand {
             # overwritten with different content throws, naming the path. No blanket "anything
             # changed anywhere?" prompt (real git doesn't have one either); -f/--force carries
             # through to discard a genuine conflict instead of refusing, like real git's
-            # `checkout -f`.
-            Restore-PsGitTree -RepoPath $repo -Id $targetId -Force:$force -PreserveUnaffectedEdits
+            # `checkout -f`. -OldId (#34) is what lets that per-path check tell a *staged* edit
+            # apart from an ordinary clean file - without it, a staged edit identical to what's on
+            # disk looks indistinguishable from "never touched" and gets silently discarded.
+            # $prevHead.Id is $null in a brand-new repo with no commits yet, which Restore-PsGitTree
+            # treats as "no old tree to compare against" (falls back to its prior index-only check).
+            Restore-PsGitTree -RepoPath $repo -Id $targetId -Force:$force -PreserveUnaffectedEdits -OldId $prevHead.Id
             if ($branchId) {
                 [System.IO.File]::WriteAllText((Join-Path $repo '.git\HEAD'), "ref: refs/heads/$refName`n")
             } else {

@@ -19,8 +19,7 @@ function Restore-PsGitTree {
         result of landing on the target tree/commit, so it's skipped outright rather than
         rewritten - whatever is sitting on disk (a clean copy, an uncommitted edit, or a local
         deletion) rides along untouched, the same way real git's own checkout only ever touches
-        paths that actually differ between the two commits' trees. The index entry for it is
-        still written from the target tree below, same id either way. This is opt-in and NOT the
+        paths that actually differ between the two commits' trees. This is opt-in and NOT the
         default: callers like `git reset --hard` restore to a tree that's frequently identical to
         the current index (the whole point is discarding every uncommitted change back to HEAD,
         not preserving any of them), so they must keep passing -Force without this switch to get
@@ -50,11 +49,30 @@ function Restore-PsGitTree {
     .PARAMETER PreserveUnaffectedEdits
         Skip (don't touch on disk at all) any target path whose id already matches the current
         index entry - see the DESCRIPTION. Off by default.
+    .PARAMETER OldId
+        The commit/tree that was checked out immediately before this restore (i.e. the current
+        HEAD, pre-switch) - see Gitea #34. Without it, -PreserveUnaffectedEdits and the
+        uncommitted-edit conflict check both use the *index* as a stand-in for "what was
+        previously here", which is only a correct proxy for an ordinary unstaged edit (index ==
+        old committed content, on-disk differs = the edit). It breaks for a **staged** edit: the
+        index already holds the staged content, so a path staged identically to what's on disk is
+        indistinguishable from an ordinary clean file with no way to tell it apart from "this
+        never differed from HEAD" - checkout would silently discard it with zero warning. Passing
+        -OldId gives a real third tree to compare against (old tree / target tree / index /
+        on-disk, matching real git's own checkout merge), so a path is only ever treated as
+        unaffected when its content is *actually* identical between the old and target branch
+        tips, and a write/removal is only ever treated as conflict-free when neither the working
+        tree nor the index has diverged from that old tree - staged or not. When a path IS
+        preserved this way, its index entry is carried forward as whatever the index already has
+        for it (not silently reset to the target tree's id), so a preserved staged edit still
+        shows up as staged (not clobbered, not silently unstaged) after the switch.
+        Callers that omit -OldId (or don't pass -PreserveUnaffectedEdits at all, e.g. `git reset
+        --hard`'s plain -Force) get the prior index-only behavior unchanged.
     .NOTES
         PowerShell 5.1+. Public.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$Id, [switch]$Force, [switch]$PreserveUnaffectedEdits)
+    param([Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$Id, [switch]$Force, [switch]$PreserveUnaffectedEdits, [string]$OldId)
     $obj = Get-PsGitObject -RepoPath $RepoPath -Id $Id
     $treeId = if ($obj.Type -eq 'commit') { (ConvertFrom-PsGitCommit -Content $obj.Content).Tree }
               elseif ($obj.Type -eq 'tree') { $Id }
@@ -65,6 +83,19 @@ function Restore-PsGitTree {
     $idxMap = @{}
     foreach ($ie in (Read-PsGitIndex -RepoPath $RepoPath)) { $idxMap[$ie.Path] = $ie.Id }
     $targetPaths = [System.Collections.Generic.HashSet[string]]::new([string[]]@($entries | ForEach-Object { $_.Path }))
+
+    # See #34 / -OldId in the DESCRIPTION above: when given, this is the real third tree that lets
+    # a staged edit be told apart from an ordinary clean file. $null when omitted, which every use
+    # below treats as "fall back to the index as the old-content stand-in" (the prior behavior).
+    $oldMap = $null
+    if ($OldId) {
+        $oldObj = Get-PsGitObject -RepoPath $RepoPath -Id $OldId
+        $oldTreeId = if ($oldObj.Type -eq 'commit') { (ConvertFrom-PsGitCommit -Content $oldObj.Content).Tree }
+                     elseif ($oldObj.Type -eq 'tree') { $OldId }
+                     else { throw "Object $OldId is a '$($oldObj.Type)'; expected commit or tree." }
+        $oldMap = @{}
+        foreach ($oe in (Expand-PsGitTree -RepoPath $RepoPath -TreeId $oldTreeId)) { $oldMap[$oe.Path] = $oe.Id }
+    }
 
     # Phase 1a: plan every write and pre-flight it. No target file is modified in this loop.
     $plan = [System.Collections.Generic.List[object]]::new()
@@ -86,18 +117,26 @@ function Restore-PsGitTree {
         if (-not $absFull.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Refusing to restore '$($e.Path)': resolves outside the repository root."
         }
-        $indexEntries.Add([pscustomobject]@{ Path = $e.Path; Mode = $e.Mode; Id = $e.Id; Size = $blob.Content.Length })
-
         $existed = Test-Path -LiteralPath $abs
         $isDirectoryOnDisk = $existed -and (Get-Item -LiteralPath $abs -Force).PSIsContainer
-        if ($PreserveUnaffectedEdits -and -not $isDirectoryOnDisk -and $e.Id -eq $idxMap[$e.Path]) {
-            # This path's target content is identical to what the index already has for it -
+        # "Old content" for the unaffected-path test: the real old tree when -OldId was given,
+        # else the index (prior behavior - only a correct stand-in for an unstaged edit, see #34).
+        $oldEntryId = if ($oldMap) { $oldMap[$e.Path] } else { $idxMap[$e.Path] }
+        if ($PreserveUnaffectedEdits -and -not $isDirectoryOnDisk -and $e.Id -eq $oldEntryId) {
+            # This path's target content is identical to what was previously checked out for it -
             # nothing about it is changing because of this restore, so leave the working tree
             # alone (see #30) instead of rewriting it - a non-conflicting uncommitted edit or
             # deletion rides along untouched, the way real git's checkout only ever touches paths
-            # that actually differ between commits. The index entry above already covers it.
+            # that actually differ between commits. The index entry is carried forward as whatever
+            # the index already holds for this path (which may differ from the target's id - a
+            # staged edit, say) rather than reset to the target's id, so a preserved staged edit
+            # still shows up as staged afterward instead of being silently discarded (#34).
+            $preservedIndexId = if ($idxMap.ContainsKey($e.Path)) { $idxMap[$e.Path] } else { $e.Id }
+            $preservedSize = if ($preservedIndexId -eq $e.Id) { $blob.Content.Length } else { (Get-PsGitObject -RepoPath $RepoPath -Id $preservedIndexId).Content.Length }
+            $indexEntries.Add([pscustomobject]@{ Path = $e.Path; Mode = $e.Mode; Id = $preservedIndexId; Size = $preservedSize })
             continue
         }
+        $indexEntries.Add([pscustomobject]@{ Path = $e.Path; Mode = $e.Mode; Id = $e.Id; Size = $blob.Content.Length })
 
         $priorBytes = $null
         $replacesDirectory = $false
@@ -123,9 +162,21 @@ function Restore-PsGitTree {
             if (-not $Force) {
                 $onDiskId = Get-PsGitObjectId -Type 'blob' -Content $priorBytes
                 if ($onDiskId -ne $e.Id) {
-                    $knownId = $idxMap[$e.Path]
-                    if ($onDiskId -ne $knownId) {
-                        throw "Restore refused: '$($e.Path)' has uncommitted changes that would be overwritten. Re-run with -Force to discard them."
+                    if ($oldMap) {
+                        # Real three-way check (#34): safe to overwrite only if NEITHER the
+                        # working tree NOR the index has diverged from what was previously
+                        # checked out for this path - a staged-but-not-yet-committed edit (index
+                        # != old, even if on-disk == index) is just as much a conflict as an
+                        # ordinary unstaged one.
+                        $oldPathId = $oldMap[$e.Path]
+                        if ($onDiskId -ne $oldPathId -or $idxMap[$e.Path] -ne $oldPathId) {
+                            throw "Restore refused: '$($e.Path)' has uncommitted changes that would be overwritten. Re-run with -Force to discard them."
+                        }
+                    } else {
+                        $knownId = $idxMap[$e.Path]
+                        if ($onDiskId -ne $knownId) {
+                            throw "Restore refused: '$($e.Path)' has uncommitted changes that would be overwritten. Re-run with -Force to discard them."
+                        }
                     }
                 }
                 if ($isReadOnly) {
@@ -160,7 +211,15 @@ function Restore-PsGitTree {
         $priorBytes = [System.IO.File]::ReadAllBytes($abs)
         if (-not $Force) {
             $onDiskId = Get-PsGitObjectId -Type 'blob' -Content $priorBytes
-            if ($onDiskId -ne $idxMap[$path]) {
+            if ($oldMap) {
+                # Same three-way reasoning as the write-path check above (#34): a path staged for
+                # removal's target tree, whose index entry is itself a staged edit relative to the
+                # old tree, is a conflict even when on-disk already matches the index.
+                $oldPathId = $oldMap[$path]
+                if ($onDiskId -ne $oldPathId -or $idxMap[$path] -ne $oldPathId) {
+                    throw "Restore refused: '$path' has uncommitted changes and would be removed by this restore. Re-run with -Force to discard them."
+                }
+            } elseif ($onDiskId -ne $idxMap[$path]) {
                 throw "Restore refused: '$path' has uncommitted changes and would be removed by this restore. Re-run with -Force to discard them."
             }
         }
