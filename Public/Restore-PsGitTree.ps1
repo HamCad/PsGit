@@ -68,6 +68,13 @@ function Restore-PsGitTree {
         shows up as staged (not clobbered, not silently unstaged) after the switch.
         Callers that omit -OldId (or don't pass -PreserveUnaffectedEdits at all, e.g. `git reset
         --hard`'s plain -Force) get the prior index-only behavior unchanged.
+
+        -OldId also lets phase 1b tell apart "this path was removed by the target branch" from
+        "this path was never part of either branch at all" (see Gitea #35) - a path staged in the
+        index but absent from BOTH the old and target trees (a brand-new `git add`ed file that's
+        never been committed anywhere) is outside the diff on both sides, so real git's checkout
+        never touches it - no refusal, no removal, not even under -Force. Without -OldId, phase 1b
+        can't distinguish that case from an ordinary tracked-path removal and treats it as one.
     .NOTES
         PowerShell 5.1+. Public.
     #>
@@ -81,7 +88,8 @@ function Restore-PsGitTree {
     $repoRoot = [System.IO.Path]::GetFullPath($RepoPath).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 
     $idxMap = @{}
-    foreach ($ie in (Read-PsGitIndex -RepoPath $RepoPath)) { $idxMap[$ie.Path] = $ie.Id }
+    $idxEntryMap = @{}
+    foreach ($ie in (Read-PsGitIndex -RepoPath $RepoPath)) { $idxMap[$ie.Path] = $ie.Id; $idxEntryMap[$ie.Path] = $ie }
     $targetPaths = [System.Collections.Generic.HashSet[string]]::new([string[]]@($entries | ForEach-Object { $_.Path }))
 
     # See #34 / -OldId in the DESCRIPTION above: when given, this is the real third tree that lets
@@ -131,8 +139,9 @@ function Restore-PsGitTree {
             # the index already holds for this path (which may differ from the target's id - a
             # staged edit, say) rather than reset to the target's id, so a preserved staged edit
             # still shows up as staged afterward instead of being silently discarded (#34).
-            $preservedIndexId = if ($idxMap.ContainsKey($e.Path)) { $idxMap[$e.Path] } else { $e.Id }
-            $preservedSize = if ($preservedIndexId -eq $e.Id) { $blob.Content.Length } else { (Get-PsGitObject -RepoPath $RepoPath -Id $preservedIndexId).Content.Length }
+            $preservedEntry = $idxEntryMap[$e.Path]
+            $preservedIndexId = if ($preservedEntry) { $preservedEntry.Id } else { $e.Id }
+            $preservedSize = if ($preservedEntry) { $preservedEntry.Size } else { $blob.Content.Length }
             $indexEntries.Add([pscustomobject]@{ Path = $e.Path; Mode = $e.Mode; Id = $preservedIndexId; Size = $preservedSize })
             continue
         }
@@ -195,9 +204,22 @@ function Restore-PsGitTree {
 
     # Phase 1b: plan removal of tracked paths the target tree no longer has (branch isolation -
     # #10). Same uncommitted-edit guard as a write: a locally modified file that would be
-    # deleted is refused, not silently discarded, unless -Force.
+    # deleted is refused, not silently discarded, unless -Force. When -OldId is given, a path
+    # that was never in the old tree either is left alone entirely instead - see #35 below.
     foreach ($path in $idxMap.Keys) {
         if ($targetPaths.Contains($path)) { continue }
+
+        if ($oldMap -and -not $oldMap.ContainsKey($path)) {
+            # This path isn't in the target tree, but it was ALSO never in the old tree - it's
+            # not part of the diff between the two branches on either side (a staged brand-new
+            # file that's never been committed anywhere - #35). Real git's checkout leaves a path
+            # like this alone entirely: no refusal, no removal, not even under -Force. Carry its
+            # current index entry forward unchanged; phase 2 never touches it either, since no
+            # plan entry is created for it here.
+            $indexEntries.Add($idxEntryMap[$path])
+            continue
+        }
+
         $abs = Join-Path $RepoPath (ConvertTo-PsGitNativePath $path)
         $absFull = [System.IO.Path]::GetFullPath($abs)
         if (-not $absFull.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }

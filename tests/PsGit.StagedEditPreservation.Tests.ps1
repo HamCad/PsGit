@@ -1,7 +1,9 @@
 <#
 .SYNOPSIS
     Coverage for Gitea #34 ("git checkout can silently discard staged (git add'ed) but
-    uncommitted changes") - found while verifying #30's fix.
+    uncommitted changes" - found while verifying #30's fix) and its follow-up #35 (a staged
+    brand-new file, tracked in neither branch, should be left alone by checkout entirely, matching
+    real git, rather than refused/discarded).
 .DESCRIPTION
     Root cause: `Restore-PsGitTree`'s conflict/no-op check only ever compared two trees (the
     target tree and the current index), using the index as a stand-in for "what was previously
@@ -19,8 +21,15 @@
     check both compare against the real old tree instead of the index, and a preserved path's
     index entry is carried forward as whatever the index already holds for it (not silently reset
     to the target's id) so a staged edit still shows up staged afterward instead of vanishing. The
-    same three-way reasoning was applied to the phase-1b removal path too (see the last Describe
-    block: a staged brand-new file, tracked in neither branch's tree, was at identical risk).
+    same three-way reasoning was applied to the phase-1b removal path too, refusing rather than
+    silently discarding a staged edit to a path the target tree drops.
+
+    #35 (see the last Describe block) went one step further for phase 1b specifically: a path
+    staged in the index but absent from BOTH the old and target trees (never committed anywhere)
+    isn't part of the branch-switch diff at all, so refusing it (the #34-era behavior) was overly
+    conservative next to real git, which leaves it alone unconditionally - not even -Force removes
+    it. Fixed by skipping such a path outright in phase 1b (no plan entry, current index entry
+    carried forward as-is) whenever -OldId is given and the old tree doesn't have the path either.
 .NOTES
     PowerShell 5.1+ / Pester 3.4 syntax ('Should Be', no dash operators), matching the existing
     suite's convention.
@@ -156,45 +165,62 @@ Describe 'Issue #34: git reset --hard is unaffected - it still discards a staged
     }
 }
 
-Describe 'Issue #34 edge case: a staged brand-new file, tracked in neither branch, is refused rather than silently deleted' {
+Describe 'Issue #34 edge case (now fixed as #35): a staged brand-new file, tracked in neither branch, is left completely alone by checkout' {
     <#
-    Before this fix, phase 1b's removal guard compared on-disk content to the INDEX only - for a
-    path staged as a new file (present in the index, absent from both the old and target trees,
-    since it was never committed anywhere), on-disk always matches the index right after `git add`,
-    so the old guard saw "no conflict" and silently deleted it during a branch switch to a branch
-    that also doesn't have this path. The #34 fix's three-way check catches this too: on-disk (and
-    the index) diverge from the old tree's entry for this path (which doesn't exist - $null), so
-    it's treated as a conflict like any other uncommitted change, refused unless -Force. NOTE: real
-    git actually leaves a path like this alone entirely (it's outside the diff between the two
-    trees on both sides), rather than refusing/requiring -Force - PsGit's phase 1b removes any
-    index path missing from the target tree unconditionally (see #10), so getting the fully
-    real-git-matching "leave it alone" behavior here would need a further, separate change. Filed
-    as a follow-up rather than expanding #34's scope - see Gitea issue filed alongside this suite.
+    NOTE: this Describe block used to assert #34's interim behavior - refusing the switch (or
+    discarding the file with -f) - for a path staged as a new file, present in the index but
+    absent from both the old and target trees since it was never committed anywhere. That was
+    flagged in #34 itself as NOT matching real git, which leaves a path like this alone entirely
+    (it's outside the diff between the two trees on both sides), and was filed as a small
+    follow-up rather than expanding #34's scope: Gitea #35.
+
+    #35 is now fixed too: `Restore-PsGitTree`'s phase 1b skips a path outright (no removal plan
+    entry at all - not even refused, not even under -Force) whenever -OldId is given and the old
+    tree doesn't have the path either. Its current index entry is carried forward into the
+    rewritten index unchanged, so the file survives on disk AND stays staged, matching real git's
+    checkout exactly - no exception for -f, since real git's -f only overrides genuine conflicts
+    between the two trees, and this path was never part of that diff to begin with.
     #>
 
-    It 'refuses (with a message naming the path) instead of silently deleting the staged new file' {
-        $repo = New-PsGitStagedEditRepo 'staged-new-file-refuse'
+    It 'switches branches with no error, leaving the staged new file exactly as it was' {
+        $repo = New-PsGitStagedEditRepo 'staged-new-file-untouched'
         'brand new' | Set-Content -LiteralPath (Join-Path $repo 'newfile.txt') -NoNewline -Encoding UTF8
         Invoke-PsGitCommand -CommandInput 'add newfile.txt' -RepoPath $repo
         Invoke-PsGitCommand -CommandInput 'branch new mybranch' -RepoPath $repo
 
         $out = Invoke-PsGitCommand -CommandInput 'checkout mybranch' -RepoPath $repo 6>&1 | Out-String
-        $out | Should Match "newfile.txt' has uncommitted changes"
-        Test-Path -LiteralPath (Join-Path $repo 'newfile.txt') | Should Be $true
+        $out | Should Match 'Checked out mybranch'
+        (Get-Content -LiteralPath (Join-Path $repo 'newfile.txt') -Raw) | Should Be 'brand new'
         $st = Get-PsGitStatus -RepoPath $repo
-        $st.Branch | Should Be 'main'
+        $st.Branch | Should Be 'mybranch'
         @($st.Staged | Where-Object { $_.Path -eq 'newfile.txt' -and $_.State -eq 'added' }).Count | Should Be 1
     }
 
-    It '-f/--force on that same case discards the staged new file and completes the switch' {
-        $repo = New-PsGitStagedEditRepo 'staged-new-file-force'
+    It '-f/--force on that same case still leaves it alone, matching real git checkout -f' {
+        $repo = New-PsGitStagedEditRepo 'staged-new-file-untouched-force'
         'brand new' | Set-Content -LiteralPath (Join-Path $repo 'newfile.txt') -NoNewline -Encoding UTF8
         Invoke-PsGitCommand -CommandInput 'add newfile.txt' -RepoPath $repo
         Invoke-PsGitCommand -CommandInput 'branch new mybranch' -RepoPath $repo
 
         $out = Invoke-PsGitCommand -CommandInput 'checkout -f mybranch' -RepoPath $repo 6>&1 | Out-String
         $out | Should Match 'Checked out mybranch'
-        Test-Path -LiteralPath (Join-Path $repo 'newfile.txt') | Should Be $false
-        (Get-PsGitStatus -RepoPath $repo).Branch | Should Be 'mybranch'
+        (Get-Content -LiteralPath (Join-Path $repo 'newfile.txt') -Raw) | Should Be 'brand new'
+        $st = Get-PsGitStatus -RepoPath $repo
+        $st.Branch | Should Be 'mybranch'
+        @($st.Staged | Where-Object { $_.Path -eq 'newfile.txt' -and $_.State -eq 'added' }).Count | Should Be 1
+    }
+
+    It 'a staged new file survives a round trip back to the original branch too, still staged' {
+        $repo = New-PsGitStagedEditRepo 'staged-new-file-roundtrip'
+        'brand new' | Set-Content -LiteralPath (Join-Path $repo 'newfile.txt') -NoNewline -Encoding UTF8
+        Invoke-PsGitCommand -CommandInput 'add newfile.txt' -RepoPath $repo
+        Invoke-PsGitCommand -CommandInput 'branch new mybranch' -RepoPath $repo
+        Invoke-PsGitCommand -CommandInput 'checkout mybranch' -RepoPath $repo
+        Invoke-PsGitCommand -CommandInput 'checkout main' -RepoPath $repo
+
+        (Get-Content -LiteralPath (Join-Path $repo 'newfile.txt') -Raw) | Should Be 'brand new'
+        $st = Get-PsGitStatus -RepoPath $repo
+        $st.Branch | Should Be 'main'
+        @($st.Staged | Where-Object { $_.Path -eq 'newfile.txt' -and $_.State -eq 'added' }).Count | Should Be 1
     }
 }
