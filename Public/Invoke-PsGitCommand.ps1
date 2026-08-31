@@ -178,7 +178,7 @@ function Invoke-PsGitCommand {
         }
         'checkout' {
             $parts = @($rest.Trim() -split '\s+' | Where-Object { $_ })
-            if ($parts.Count -eq 0) { Write-Host "`n* Usage: git checkout <branch|commit> | -b <new-branch> [<start-point>]`n" -ForegroundColor Yellow; break }
+            if ($parts.Count -eq 0) { Write-Host "`n* Usage: git checkout [-f] <branch|commit> | -b <new-branch> [<start-point>]`n" -ForegroundColor Yellow; break }
             if ($parts[0] -eq '-b') {
                 if ($parts.Count -lt 2) { Write-Host "`n* Usage: git checkout -b <new-branch> [<start-point>]`n" -ForegroundColor Yellow; break }
                 $newName = $parts[1]
@@ -194,6 +194,12 @@ function Invoke-PsGitCommand {
                 New-PsGitBranch -RepoPath $repo -Name $newName -StartId $startId
                 $parts = @($newName)
             }
+            $force = $false
+            if ($parts -contains '-f' -or $parts -contains '--force') {
+                $force = $true
+                $parts = @($parts | Where-Object { $_ -ne '-f' -and $_ -ne '--force' })
+            }
+            if ($parts.Count -eq 0) { Write-Host "`n* Usage: git checkout [-f] <branch|commit> | -b <new-branch> [<start-point>]`n" -ForegroundColor Yellow; break }
             $refName = $parts[0]
             $branchId = Get-PsGitRef -RepoPath $repo -Name "refs/heads/$refName"
             $targetId = if ($branchId) {
@@ -203,17 +209,16 @@ function Invoke-PsGitCommand {
             }
             if (-not $targetId) { Write-Host "`n* Unknown ref '$refName'`n" -ForegroundColor Red; break }
             $prevHead = Get-PsGitHead -RepoPath $repo
-            $st = Get-PsGitStatus -RepoPath $repo
-            $dirty = (@($st.Staged).Count + @($st.Unstaged).Count + @($st.Untracked).Count) -gt 0
-            if ($dirty) {
-                $ans = Read-Host -Prompt 'Working tree has changes; checkout may overwrite files. Continue? (y/N)'
-                if ($ans -notmatch '^(y|yes)$') { Write-Host "`n* Checkout aborted`n" -ForegroundColor Yellow; break }
-            }
-            # Restore-PsGitTree does its own precise per-file conflict check and refuses by
-            # default (see #8); the blanket "anything changed anywhere?" prompt above is the
-            # user's confirmation for this interactive path, so -Force carries it through instead
-            # of making the user answer the same question twice in different words.
-            Restore-PsGitTree -RepoPath $repo -Id $targetId -Force
+            # Restore-PsGitTree's own per-path conflict check (#8) plus -PreserveUnaffectedEdits
+            # (#30) is the sole authority here now, matching real git: a path whose committed
+            # content is identical between the current and target branch rides along untouched no
+            # matter what local state it's in - a non-conflicting edit or deletion survives the
+            # switch instead of being silently discarded - while a path that would actually be
+            # overwritten with different content throws, naming the path. No blanket "anything
+            # changed anywhere?" prompt (real git doesn't have one either); -f/--force carries
+            # through to discard a genuine conflict instead of refusing, like real git's
+            # `checkout -f`.
+            Restore-PsGitTree -RepoPath $repo -Id $targetId -Force:$force -PreserveUnaffectedEdits
             if ($branchId) {
                 [System.IO.File]::WriteAllText((Join-Path $repo '.git\HEAD'), "ref: refs/heads/$refName`n")
             } else {

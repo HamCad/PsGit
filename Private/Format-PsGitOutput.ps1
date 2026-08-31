@@ -83,7 +83,7 @@ function Format-PsGitHelpLine {
         , @('git branch', 'List branches')
         , @('git branch new <name>', 'Create a branch')
         , @('git branch rm <name> [-f|--force|-D]', 'Delete a branch (-f/--force/-D forces an unmerged one)')
-        , @('git checkout <branch|commit>', 'Switch branches (working tree must be clean or confirmed)')
+        , @('git checkout [-f] <branch|commit>', 'Switch branches (a non-conflicting local edit rides along; -f discards a conflicting one)')
         , @('git checkout -b <new-branch> [<start-point>]', 'Create a branch (from HEAD, or <start-point>) and switch to it')
         , @('git restore <path...> | .', 'Discard unstaged edits in path(s), from the index')
         , @('git restore --staged <path...> | .', 'Unstage path(s) (alias: git unstage <path...>)')

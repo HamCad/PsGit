@@ -14,6 +14,19 @@ function Restore-PsGitTree {
         deletion, refused the same way if it carries an uncommitted edit. Nothing on disk is
         touched until every entry - written or removed - has cleared this check.
 
+        With -PreserveUnaffectedEdits (see Gitea #30), a target path whose id already matches the
+        current index entry is treated as a no-op: nothing about that file is changing as a
+        result of landing on the target tree/commit, so it's skipped outright rather than
+        rewritten - whatever is sitting on disk (a clean copy, an uncommitted edit, or a local
+        deletion) rides along untouched, the same way real git's own checkout only ever touches
+        paths that actually differ between the two commits' trees. The index entry for it is
+        still written from the target tree below, same id either way. This is opt-in and NOT the
+        default: callers like `git reset --hard` restore to a tree that's frequently identical to
+        the current index (the whole point is discarding every uncommitted change back to HEAD,
+        not preserving any of them), so they must keep passing -Force without this switch to get
+        their existing unconditional-overwrite behavior. Only a branch switch (`git checkout`)
+        wants the "did this path actually change?" question asked at all.
+
         Phase 1 also handles a path that changes type between commits (a directory becoming a
         blob/symlink, or vice versa - see Gitea #23/git-t-mining): if a write target is currently
         a directory on disk, every tracked file under it is covered by the ordinary removal
@@ -34,11 +47,14 @@ function Restore-PsGitTree {
     .PARAMETER Force
         Skip the uncommitted-edit and read-only checks; clears the read-only attribute instead of
         refusing when it's set. Mid-restore failures are still rolled back regardless.
+    .PARAMETER PreserveUnaffectedEdits
+        Skip (don't touch on disk at all) any target path whose id already matches the current
+        index entry - see the DESCRIPTION. Off by default.
     .NOTES
         PowerShell 5.1+. Public.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$Id, [switch]$Force)
+    param([Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string]$Id, [switch]$Force, [switch]$PreserveUnaffectedEdits)
     $obj = Get-PsGitObject -RepoPath $RepoPath -Id $Id
     $treeId = if ($obj.Type -eq 'commit') { (ConvertFrom-PsGitCommit -Content $obj.Content).Tree }
               elseif ($obj.Type -eq 'tree') { $Id }
@@ -52,6 +68,7 @@ function Restore-PsGitTree {
 
     # Phase 1a: plan every write and pre-flight it. No target file is modified in this loop.
     $plan = [System.Collections.Generic.List[object]]::new()
+    $indexEntries = [System.Collections.Generic.List[object]]::new()
     foreach ($e in $entries) {
         if (Test-PsGitPathReservedDeviceName -Path $e.Path) {
             throw "Refusing to restore '$($e.Path)': a path segment collides with a Windows reserved device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9) and cannot be safely created as a real file."
@@ -69,11 +86,22 @@ function Restore-PsGitTree {
         if (-not $absFull.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Refusing to restore '$($e.Path)': resolves outside the repository root."
         }
+        $indexEntries.Add([pscustomobject]@{ Path = $e.Path; Mode = $e.Mode; Id = $e.Id; Size = $blob.Content.Length })
 
         $existed = Test-Path -LiteralPath $abs
+        $isDirectoryOnDisk = $existed -and (Get-Item -LiteralPath $abs -Force).PSIsContainer
+        if ($PreserveUnaffectedEdits -and -not $isDirectoryOnDisk -and $e.Id -eq $idxMap[$e.Path]) {
+            # This path's target content is identical to what the index already has for it -
+            # nothing about it is changing because of this restore, so leave the working tree
+            # alone (see #30) instead of rewriting it - a non-conflicting uncommitted edit or
+            # deletion rides along untouched, the way real git's checkout only ever touches paths
+            # that actually differ between commits. The index entry above already covers it.
+            continue
+        }
+
         $priorBytes = $null
         $replacesDirectory = $false
-        if ($existed -and (Get-Item -LiteralPath $abs -Force).PSIsContainer) {
+        if ($isDirectoryOnDisk) {
             # Type change: this path is a directory in the working tree but a blob/symlink in the
             # target tree. Every tracked file under it is already covered by the phase 1b removal
             # loop below (any idxMap path not in the target tree gets its own dirty-checked Remove
@@ -204,11 +232,7 @@ function Restore-PsGitTree {
         }
     }
 
-    $indexEntries = [System.Collections.Generic.List[object]]::new()
-    foreach ($p in $plan) {
-        if ($p.Op -eq 'Write') {
-            $indexEntries.Add([pscustomobject]@{ Path = $p.Path; Mode = $p.Mode; Id = $p.Id; Size = $p.Content.Length })
-        }
-    }
+    # $indexEntries was built from the full target tree in phase 1a, not from $plan - a skipped
+    # (unchanged) path still needs its (unchanged) entry in the rewritten index.
     Write-PsGitIndex -RepoPath $RepoPath -Entries @($indexEntries)
 }
