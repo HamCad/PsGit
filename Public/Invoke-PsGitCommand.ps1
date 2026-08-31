@@ -2,7 +2,7 @@ function Invoke-PsGitCommand {
     <#
     .SYNOPSIS
         Drives the pure-PowerShell, local-only git engine (init/status/log/diff/add/commit/branch/
-        checkout) against a working directory - no git.exe, no remotes, no push/fetch/clone.
+        checkout/help) against a working directory - no git.exe, no remotes, no push/fetch/clone.
     .DESCRIPTION
         Ported from PowerGenAI's in-chat /git command. That original took its subcommand line from a
         chat REPL and its output/prompt/commit-message-drafting from PowerGenAI's provider and TUI
@@ -34,10 +34,11 @@ function Invoke-PsGitCommand {
 
     $arg = ([string]$CommandInput).Trim()
     $sub = if ($arg) { ($arg -split '\s+', 2)[0].ToLowerInvariant() } else { 'status' }
+    if ($sub -in @('-h', '--help')) { $sub = 'help' }
     $rest = if ($arg -and $arg -match '\s') { ($arg -split '\s+', 2)[1] } else { '' }
     $repo = $RepoPath
 
-    if ($sub -ne 'init' -and -not (Test-PsGitRepo -RepoPath $repo).IsRepo) {
+    if ($sub -notin @('init', 'help') -and -not (Test-PsGitRepo -RepoPath $repo).IsRepo) {
         Write-Host "`n* Not a git repository - run 'git init'`n" -ForegroundColor Yellow
         return
     }
@@ -158,8 +159,13 @@ function Invoke-PsGitCommand {
             Add-PsGitReflogEntry -RepoPath $repo -RefName 'HEAD' -OldId $prevHead.Id -NewId $targetId -Message "checkout: moving from $prevName to $refName"
             Write-Host "`n* Checked out $refName`n" -ForegroundColor Green
         }
+        'help' {
+            Write-Host ''
+            foreach ($ln in (Format-PsGitHelpLine)) { Write-Host $ln.Text -ForegroundColor $ln.Color }
+            Write-Host ''
+        }
         default {
-            Write-Host "`n* Unknown subcommand '$sub'`n" -ForegroundColor Red
+            Write-Host "`n* Unknown subcommand '$sub' - try 'git help'`n" -ForegroundColor Red
         }
     }
     }

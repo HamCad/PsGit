@@ -62,6 +62,50 @@ function Format-PsGitLogLine {
     return $lines.ToArray()
 }
 
+function Format-PsGitHelpLine {
+    <# .SYNOPSIS Build 'git help' output - command list, examples, general usage - as colored @{ Text; Color } lines. #>
+    [CmdletBinding()]
+    param()
+    $lines = [System.Collections.Generic.List[object]]::new()
+    $add = { param($Text, $Color = 'Gray') $lines.Add(@{ Text = $Text; Color = $Color }) }
+
+    & $add 'PsGit - a pure-PowerShell reimplementation of local git' 'Cyan'
+    & $add '(no remotes: no clone/push/pull/fetch)' 'DarkGray'
+    & $add ''
+    & $add 'Commands:' 'Cyan'
+    $cmds = @(
+        , @('git init', 'Initialize a new repository')
+        , @('git status [--porcelain]', 'Show working tree status')
+        , @('git add <path...> | .', 'Stage files (. stages every changed file)')
+        , @('git commit -m "<message>"', 'Commit staged changes')
+        , @('git log [N]', 'Show commit history (default 15)')
+        , @('git diff [<path>]', 'Show unstaged changes')
+        , @('git branch', 'List branches')
+        , @('git branch new <name>', 'Create a branch')
+        , @('git branch rm <name> [-f|--force|-D]', 'Delete a branch (-f/--force/-D forces an unmerged one)')
+        , @('git checkout <branch|commit>', 'Switch branches or restore the working tree')
+        , @('git help | -h | --help', 'Show this help')
+    )
+    $width = ($cmds | ForEach-Object { $_[0].Length } | Measure-Object -Maximum).Maximum
+    foreach ($c in $cmds) { & $add ('  {0}  {1}' -f $c[0].PadRight($width), $c[1]) }
+    & $add ''
+    & $add 'Examples:' 'Cyan'
+    foreach ($ex in @(
+        'git init'
+        'git add .'
+        'git commit -m "initial commit"'
+        'git status --porcelain'
+        'git log 5'
+        'git branch new feature-x'
+        'git checkout feature-x'
+        'git branch rm feature-x -f'
+    )) { & $add "  $ex" }
+    & $add ''
+    & $add "PsGit runs entirely on this machine's local .git store - there is" 'DarkGray'
+    & $add "nothing to push or pull. Run 'git status' any time to see where you are." 'DarkGray'
+    return $lines.ToArray()
+}
+
 function Format-PsGitDiffLine {
     <# .SYNOPSIS Colorize a unified diff string into @{ Text; Color } lines. #>
     [CmdletBinding()]
