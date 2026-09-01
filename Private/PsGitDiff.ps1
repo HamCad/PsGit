@@ -61,6 +61,11 @@ function Get-PsGitDiffLine {
     <# .SYNOPSIS Unified line diff (LCS shortest edit script) -> hunk lines; @() if identical. #>
     [CmdletBinding()]
     param([string[]]$OldLines = @(), [string[]]$NewLines = @(), [int]$Context = 3)
+    # A parameter default only applies when the argument is omitted, not when a caller passes an
+    # explicit $null - coerce here so ComputeOps (a direct .NET static call) never dereferences a
+    # null array's .Length and dies with a bare NullReferenceException (Gitea #40).
+    if ($null -eq $OldLines) { $OldLines = @() }
+    if ($null -eq $NewLines) { $NewLines = @() }
     $m = $OldLines.Count; $n = $NewLines.Count
     # LCS table-fill + backtrack happens in compiled C# (PsGit.LineDiff, above) - see issue #22.
     $opsStr = [PsGit.LineDiff]::ComputeOps($OldLines, $NewLines)

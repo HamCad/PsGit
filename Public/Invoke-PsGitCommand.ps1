@@ -40,9 +40,13 @@ function Invoke-PsGitCommand {
     if ($sub -eq 'unstage') { $sub = 'restore'; $rest = ('--staged ' + $rest).Trim() }
     $repo = $RepoPath
 
-    if ($sub -notin @('init', 'help') -and -not (Test-PsGitRepo -RepoPath $repo).IsRepo) {
-        Write-Host "`n* Not a git repository - run 'git init'`n" -ForegroundColor Yellow
-        return
+    if ($sub -notin @('init', 'help')) {
+        $root = Find-PsGitRepoRoot -StartPath $repo
+        if ($root) { $repo = $root }
+        if (-not (Test-PsGitRepo -RepoPath $repo).IsRepo) {
+            Write-Host "`n* Not a git repository - run 'git init'`n" -ForegroundColor Yellow
+            return
+        }
     }
 
     try {
@@ -70,14 +74,19 @@ function Invoke-PsGitCommand {
             Write-Host ''
         }
         'diff' {
-            $target = $rest.Trim().Trim('"')
-            $paths = if ($target) { @($target) } else {
-                $st = Get-PsGitStatus -RepoPath $repo
+            $tokens = @(ConvertTo-PsGitArgTokens -Text $rest.Trim())
+            $cached = ($tokens -contains '--cached') -or ($tokens -contains '--staged')
+            $tokens = @($tokens | Where-Object { $_ -ne '--cached' -and $_ -ne '--staged' })
+            $target = ($tokens -join ' ').Trim('"')
+            $st = Get-PsGitStatus -RepoPath $repo
+            $paths = if ($target) { @($target) } elseif ($cached) {
+                @($st.Staged | ForEach-Object Path)
+            } else {
                 @($st.Unstaged | ForEach-Object Path)
             }
             if ($paths.Count -eq 0) { Write-Host "`n* No changes to diff`n" -ForegroundColor DarkGray; break }
             foreach ($p in $paths) {
-                $d = Get-PsGitDiff -RepoPath $repo -Path $p
+                $d = Get-PsGitDiff -RepoPath $repo -Path $p -Cached:$cached
                 if ([string]::IsNullOrEmpty($d)) { continue }
                 Write-Host "--- $p" -ForegroundColor Cyan
                 foreach ($ln in (Format-PsGitDiffLine -DiffText $d)) { Write-Host $ln.Text -ForegroundColor $ln.Color }
@@ -86,10 +95,14 @@ function Invoke-PsGitCommand {
         'add' {
             $spec = $rest.Trim()
             if (-not $spec) { Write-Host "`n* Usage: git add <path...> | .`n" -ForegroundColor Yellow; break }
-            $paths = if ($spec -eq '.') { @(Get-PsGitWorkingFile -RepoPath $repo) } else { @(ConvertTo-PsGitArgTokens -Text $spec) }
+            $tokens = if ($spec -eq '.') { @('.') } else { @(ConvertTo-PsGitArgTokens -Text $spec) }
+            $paths = @(Resolve-PsGitAddPath -RepoPath $repo -Token $tokens)
             if ($paths.Count -eq 0) { Write-Host "`n* Nothing to add`n" -ForegroundColor DarkGray; break }
-            Add-PsGitFile -RepoPath $repo -Path $paths
-            Write-Host "`n* Staged $($paths.Count) file(s)`n" -ForegroundColor Green
+            $failures = @(Add-PsGitFile -RepoPath $repo -Path $paths -ContinueOnError)
+            $okCount = $paths.Count - $failures.Count
+            Write-Host "`n* Staged $okCount file(s)" -ForegroundColor Green
+            foreach ($f in $failures) { Write-Host "  ! skipped $($f.Path): $($f.Error)" -ForegroundColor Yellow }
+            Write-Host ''
         }
         'commit' {
             $msg = $null

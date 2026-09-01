@@ -9,7 +9,10 @@ function Remove-PsGitFile {
 
         Idempotent - a path that is not staged is silently ignored, so callers do not have to
         distinguish "never tracked" from "already removed". Paths are repo-relative; backslashes are
-        normalised to the forward-slash form the index stores.
+        normalised to the forward-slash form the index stores, and a leading './' or '.\' is
+        stripped the same way Add-PsGitFile/Get-PsGitDiff do - otherwise a tab-completed
+        '.\file.txt' would never match the index's plain 'file.txt' entry and silently no-op
+        instead of unstaging anything (the #40 leading-dot-slash bug, same root cause here).
     .PARAMETER RepoPath
         Repository working-tree root.
     .PARAMETER Path
@@ -26,7 +29,11 @@ function Remove-PsGitFile {
         [Parameter(Mandatory)][string[]]$Path
     )
     $drop = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    foreach ($p in $Path) { [void]$drop.Add(($p -replace '\\', '/')) }
+    foreach ($p in $Path) {
+        $key = ($p -replace '\\', '/')
+        while ($key.StartsWith('./')) { $key = $key.Substring(2) }
+        [void]$drop.Add($key)
+    }
     $kept = @(Read-PsGitIndex -RepoPath $RepoPath | Where-Object { -not $drop.Contains($_.Path) })
     Write-PsGitIndex -RepoPath $RepoPath -Entries $kept
 }
